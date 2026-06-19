@@ -1,0 +1,304 @@
+#!/bin/sh
+#
+# configure - probe the local environment and generate config.mk.
+#
+# POSIX.1-2008 shell and utilities only. Run once after checkout (and
+# again whenever the build environment changes), then run `make`. The
+# Makefile does NOT invoke configure; that separation is deliberate (the
+# autoconf discipline, without the autotools).
+#
+# Honors the conventional environment variables, folds them into every
+# probe, and records them in config.mk so the probes describe the build
+# that actually happens:
+#
+#   CC=gcc CFLAGS='-O0 -g' ./configure
+#
+# Probes by compiling test snippets rather than guessing from `uname`
+# (the layered-portability model: language -> stdlib -> POSIX -> OS
+# extras). unas has no third-party libraries at all; the only OS-extra is
+# the entropy source used to mint a bearer token, isolated in
+# src/compat/random.c and compiled WITHOUT the POSIX feature macro.
+# Every compiler invocation is transcribed to config.log.
+
+set -u
+
+# ---------------------------------------------------------------------------
+# Arguments. Silently swallowing autoconf-style options is the one
+# behavior a script named `configure` must not have.
+# ---------------------------------------------------------------------------
+prefix=
+werror=0
+for arg
+do
+    case $arg in
+    -h|--help)
+        cat <<'USAGE'
+usage: ./configure [--prefix=DIR] [--werror]
+
+  --prefix=DIR  installation prefix, written to config.mk
+                (default /usr/local; `make PREFIX=DIR install` works too)
+  --werror      append -Werror to the generated CFLAGS. Off by default:
+                future compilers invent new warnings, and a clean
+                tarball must keep building. Maintainers and CI want it.
+
+Environment: CC, CFLAGS, CPPFLAGS, LDFLAGS, LDLIBS are honored, used in
+the probes, and recorded in config.mk.
+USAGE
+        exit 0
+        ;;
+    --prefix=*) prefix=${arg#--prefix=} ;;
+    --werror)   werror=1 ;;
+    *)
+        echo "configure: error: unknown option: $arg (try --help)" >&2
+        exit 1
+        ;;
+    esac
+done
+
+CC=${CC:-cc}
+CFLAGS=${CFLAGS:-}
+CPPFLAGS=${CPPFLAGS:-}
+LDFLAGS=${LDFLAGS:-}
+LDLIBS=${LDLIBS:-}
+
+LOG=config.log
+: > "$LOG" || { echo "configure: error: cannot write $LOG" >&2; exit 1; }
+
+# One staging directory for all probes, removed on exit or signal.
+# mkdir is atomic and fails if the path exists -- the property
+# mktemp -d provides, without the non-POSIX mktemp(1).
+_stage=${TMPDIR:-/tmp}/unas-configure.$$
+mkdir -m 700 "$_stage" || {
+    echo "configure: error: cannot create staging dir $_stage" >&2
+    exit 1
+}
+trap 'rm -rf "$_stage"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# ---------------------------------------------------------------------------
+# compiles() — does a C snippet compile (and link) with the given flags?
+#   compiles "<cc flags>" "<libraries>" "<C source>"  -> 0 on success
+# Libraries go after the source file, where single-pass linkers need
+# them. Every attempt (command, snippet, diagnostics) lands in
+# config.log so a failed probe on a strange platform is debuggable.
+# ---------------------------------------------------------------------------
+compiles() {
+    printf '%s\n' "$3" > "$_stage/test.c" || {
+        echo 'configure: error: cannot write probe source' >&2
+        exit 1
+    }
+    {
+        printf '### %s %s -o test test.c %s\n' "$CC" "$1" "$2"
+        cat "$_stage/test.c"
+    } >> "$LOG"
+    $CC $1 -o "$_stage/test" "$_stage/test.c" $2 >> "$LOG" 2>&1
+}
+
+echo 'configure: probing toolchain...'
+
+# --- C compiler ------------------------------------------------------------
+if ! command -v -- "${CC%% *}" >/dev/null 2>&1; then
+    echo "configure: error: compiler not found: $CC" >&2
+    exit 1
+fi
+
+# C99 mode is required; the spelling varies by vendor. -std=c99
+# (GCC/Clang), -xc99=all (Oracle Studio), -qlanglvl=stdc99 (IBM xlc),
+# -AC99 (HP), or nothing at all (compilers that are C99+ by default).
+c99_src='
+#include <stddef.h>
+int main(void){ for (size_t i=0;i<1;i++){(void)i;} return 0; }
+'
+STD=none
+for _f in '-std=c99' '-xc99=all' '-qlanglvl=stdc99' '-AC99' ''; do
+    if compiles "$_f" '' "$c99_src"; then STD=$_f; break; fi
+done
+if [ "$STD" = none ]; then
+    echo "configure: error: $CC cannot compile C99 (see config.log)" >&2
+    exit 1
+fi
+
+# Warning flags are developer convenience, never build requirements:
+# keep each one only if this compiler accepts it. -Werror rides along in
+# these acceptance probes (an unknown -W option must fail them) but is
+# not itself shipped -- see --werror.
+WARN=
+for _w in -pedantic -Wall -Wextra; do
+    if compiles "$STD $_w -Werror" '' "$c99_src"; then WARN="$WARN $_w"; fi
+done
+
+# Optimization: -O2 where understood, plain -O as the fallback.
+OPT=
+for _o in -O2 -O; do
+    if compiles "$STD $_o" '' "$c99_src"; then OPT=" $_o"; break; fi
+done
+
+BASE_CFLAGS="$STD$WARN$OPT"
+if [ "$werror" = 1 ]; then
+    BASE_CFLAGS="$BASE_CFLAGS -Werror"
+fi
+if [ -n "$CFLAGS" ]; then
+    BASE_CFLAGS="$BASE_CFLAGS $CFLAGS"   # user flags last, so -O0/-g win
+fi
+echo "  cc:             ok ($CC, flags: $BASE_CFLAGS)"
+
+# Preprocessor flag sets, defined once and used both for the probes and
+# for config.mk so the two cannot drift. _FILE_OFFSET_BITS=64 gives a
+# 64-bit off_t on ILP32 platforms (a file server must handle >2 GiB
+# files); it is harmlessly ignored where off_t is already 64-bit.
+CORE_CPP="-D_POSIX_C_SOURCE=200809L -D_FILE_OFFSET_BITS=64 -Isrc/core -Isrc/compat"
+COMPAT_CPP="-D_FILE_OFFSET_BITS=64 -Isrc/compat"
+
+STRICT="$BASE_CFLAGS $CORE_CPP $CPPFLAGS $LDFLAGS"
+COMPAT="$BASE_CFLAGS $COMPAT_CPP $CPPFLAGS $LDFLAGS"
+
+# --- POSIX.1-2008 ----------------------------------------------------------
+if ! compiles "$STRICT" "$LDLIBS" '
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/types.h>
+int main(void){ ssize_t n=0; (void)n; return 0; }
+'; then
+    echo 'configure: error: cannot compile with _POSIX_C_SOURCE=200809L (see config.log)' >&2
+    exit 1
+fi
+echo '  posix:          ok (POSIX.1-2008)'
+
+# --- getaddrinfo (TCP listener bind) ---------------------------------------
+# Probe with escalating library sets: getaddrinfo is in libc almost
+# everywhere, but lives in libsocket/libnsl on illumos/Solaris. Record
+# the winner in CONFIG_LDLIBS rather than rejecting the platform.
+NETLIBS=none
+for _libs in '' '-lsocket -lnsl'; do
+    if compiles "$STRICT" "$_libs $LDLIBS" '
+#include <sys/socket.h>
+#include <netdb.h>
+int main(void){ struct addrinfo h; (void)h; return getaddrinfo(0,0,0,0)?0:0; }
+'; then NETLIBS=$_libs; break; fi
+done
+if [ "$NETLIBS" = none ]; then
+    echo 'configure: error: cannot compile and link getaddrinfo(), needed to bind the listener (see config.log)' >&2
+    exit 1
+fi
+echo "  getaddrinfo:    ok${NETLIBS:+ ($NETLIBS)}"
+
+# --- statvfs (capacity for /v1/shares) -------------------------------------
+if ! compiles "$STRICT" "$LDLIBS" '
+#include <sys/statvfs.h>
+int main(void){ struct statvfs s; return statvfs(".",&s); }
+'; then
+    echo 'configure: error: cannot compile and link statvfs(), needed by /v1/shares (see config.log)' >&2
+    exit 1
+fi
+echo '  statvfs:        ok'
+
+# --- clock_gettime(CLOCK_MONOTONIC) (uptime, unique temp names) ------------
+# Older glibc (< 2.17) and Solaris 10 keep clock_gettime in librt.
+RTLIBS=none
+for _libs in '' '-lrt'; do
+    if compiles "$STRICT" "$_libs $LDLIBS" '
+#include <time.h>
+int main(void){ struct timespec ts; return clock_gettime(CLOCK_MONOTONIC,&ts); }
+'; then RTLIBS=$_libs; break; fi
+done
+if [ "$RTLIBS" = none ]; then
+    echo 'configure: error: cannot compile and link clock_gettime(CLOCK_MONOTONIC) (see config.log)' >&2
+    exit 1
+fi
+echo "  clock_gettime:  ok${RTLIBS:+ ($RTLIBS)}"
+
+# --- gmtime_r (HTTP/RFC3339 date formatting) -------------------------------
+if ! compiles "$STRICT" "$LDLIBS" '
+#include <time.h>
+int main(void){ time_t t=0; struct tm tm; return gmtime_r(&t,&tm)?0:1; }
+'; then
+    echo 'configure: error: cannot compile and link gmtime_r() (see config.log)' >&2
+    exit 1
+fi
+echo '  gmtime_r:       ok'
+
+# --- Entropy source (bearer-token minting) ---------------------------------
+# Prefer arc4random_buf (BSD/macOS: never fails, no fd); else getrandom
+# (Linux). compat/random.c selects on these macros; one MUST be present.
+#
+# CRITICAL (the layered model's "separation rule"): these are NON-POSIX OS
+# extras. Defining _POSIX_C_SOURCE hides arc4random_buf on macOS and gates
+# getrandom on glibc, so we probe — and later compile compat/ — WITHOUT the
+# POSIX feature macro, with the same flags the compat TU is built with.
+# The default namespace exposes the platform RNG; the rest of the tree
+# stays strictly POSIX.
+HAVE_ARC4RANDOM=0
+HAVE_GETRANDOM=0
+if compiles "$COMPAT" "$LDLIBS" '
+#include <stdlib.h>
+int main(void){ unsigned char b[4]; arc4random_buf(b,sizeof b); return (int)b[0]; }
+'; then
+    HAVE_ARC4RANDOM=1
+    echo '  entropy:        ok (arc4random_buf)'
+elif compiles "$COMPAT" "$LDLIBS" '
+#include <sys/random.h>
+int main(void){ unsigned char b[4]; return getrandom(b,sizeof b,0)<0?1:(int)b[0]; }
+'; then
+    HAVE_GETRANDOM=1
+    echo '  entropy:        ok (getrandom)'
+else
+    echo 'configure: error: no entropy source (neither arc4random_buf nor getrandom; see config.log)' >&2
+    echo '  Wrap your platform RNG in src/compat/random.c and add a -DHAVE_* macro.' >&2
+    exit 1
+fi
+
+# Libraries the probes discovered, plus whatever the user supplied.
+ALL_LDLIBS=
+for _l in $NETLIBS $RTLIBS $LDLIBS; do ALL_LDLIBS="$ALL_LDLIBS $_l"; done
+ALL_LDLIBS=${ALL_LDLIBS# }
+
+CPPFLAGS_OUT=
+if [ -n "$CPPFLAGS" ]; then CPPFLAGS_OUT=" $CPPFLAGS"; fi
+
+# ---------------------------------------------------------------------------
+# Write config.mk — atomically (temp file, then rename) and with the
+# write checked: make must never include a half-written config.mk, and
+# a failed write must not report success.
+# ---------------------------------------------------------------------------
+cat > config.mk.tmp <<EOF || { rm -f config.mk.tmp; echo 'configure: error: cannot write config.mk' >&2; exit 1; }
+# config.mk — GENERATED by ./configure on $(uname -s) $(uname -m), $(date).
+# Re-run ./configure to regenerate. Do not edit by hand; edits are lost
+# on re-configure.
+
+CC      = $CC
+
+# Strict flags for our own translation units: C99 plus every warning
+# flag this compiler accepts. -Werror is deliberately NOT the default
+# (future compilers invent new warnings; a clean tarball must keep
+# building) — re-run ./configure --werror for maintainer/CI builds.
+CONFIG_CFLAGS   = $BASE_CFLAGS
+CONFIG_CPPFLAGS = $CORE_CPP \$(HAVE_DEFS)$CPPFLAGS_OUT
+CONFIG_LDFLAGS  = $LDFLAGS
+CONFIG_LDLIBS   = $ALL_LDLIBS
+
+# Capability macros discovered by ./configure's entropy probe.
+# compat/random.c selects its backend on HAVE_ARC4RANDOM / HAVE_GETRANDOM.
+HAVE_DEFS = -DHAVE_ARC4RANDOM=$HAVE_ARC4RANDOM -DHAVE_GETRANDOM=$HAVE_GETRANDOM
+
+# Preprocessor flags for src/compat/ — the OS-specific TUs. WITHOUT
+# _POSIX_C_SOURCE so the platform RNG (arc4random_buf/getrandom) is
+# visible. Compiled with the same \$(CFLAGS) as the POSIX-conformant rest.
+COMPAT_CPPFLAGS = $COMPAT_CPP \$(HAVE_DEFS)$CPPFLAGS_OUT
+EOF
+
+if [ -n "$prefix" ]; then
+    printf '\n# Installation prefix (./configure --prefix).\nPREFIX = %s\n' "$prefix" >> config.mk.tmp || {
+        rm -f config.mk.tmp
+        echo 'configure: error: cannot write config.mk' >&2
+        exit 1
+    }
+fi
+
+mv config.mk.tmp config.mk || {
+    rm -f config.mk.tmp
+    echo 'configure: error: cannot write config.mk' >&2
+    exit 1
+}
+
+echo 'configure: wrote config.mk'
+echo 'configure: run `make` to build unasd, `make test` to build and run the tests.'
