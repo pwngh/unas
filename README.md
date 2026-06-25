@@ -10,6 +10,12 @@ over HTTP/1.1 so anything that speaks HTTP — `curl`, a Python script, a
 browser, a menu-bar app — can read, write, list, move, and delete files
 on hardware you own, with no NFS client on the caller's side.
 
+> **New — works with the UniFi ENAS too.** Ubiquiti's Enterprise NAS
+> (shipped June 2026 — 16-bay ZFS, iSCSI, dual 25GbE) is still a locked
+> UniFi OS appliance: files leave it only over SMB/NFS/iSCSI and the UniFi
+> Drive apps, with no inbound HTTP file API. Same gap as the UNAS, same
+> fix — mount an ENAS share on the host and `unasd` re-exposes it unchanged.
+
 ## The whole idea, in one table
 
 Every request is a shell command you already know. The method picks the
@@ -219,11 +225,12 @@ $ curl -H "$A" localhost:8088/v1/shares
   "avail_bytes":762697428992,"scope":"pool"}]}
 ```
 
-## Why it has to run on a host (not the UNAS)
+## Why it has to run on a host (not the NAS itself)
 
-UniFi OS is locked. The UNAS exposes only SMB/NFS shares plus the UniFi
-Drive app — no native inbound file API. So `unasd` runs on any small
-always-on host that mounts the share and re-exposes it over HTTP.
+UniFi OS is locked. The UNAS — and the new Enterprise NAS (ENAS) — expose
+only SMB/NFS shares (plus iSCSI and the UniFi Drive apps), with no native
+inbound file API. So `unasd` runs on any small always-on host that mounts
+the share and re-exposes it over HTTP.
 
 ## Path safety
 
