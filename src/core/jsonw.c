@@ -1,3 +1,14 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/jsonw.c — JSON builder. Strict C99. */
 #include "jsonw.h"
 
@@ -21,6 +32,11 @@ void jb_free(json_buf *b)
     b->len = b->cap = 0;
 }
 
+/* Ensure room for `extra` more bytes plus the trailing NUL, growing the buffer
+ * geometrically (doubling from 64). b->err is a sticky failure latch: once an
+ * allocation fails it stays set, every later jb_* call short-circuits to a
+ * no-op, and jb_take returns NULL — so a caller builds the whole document and
+ * checks for failure once at the end, never after each append. */
 static int jb_reserve(json_buf *b, size_t extra)
 {
     size_t need;
@@ -55,6 +71,10 @@ static void jb_puts(json_buf *b, const char *s)
     b->buf[b->len] = '\0';
 }
 
+/* Hand the finished buffer to the caller, who now owns it and must free(),
+ * and reset the builder to empty so the json_buf can be reused or dropped.
+ * NULL is returned only on err; a builder that emitted nothing still yields a
+ * valid empty C-string ("") via the reserve-and-NUL path below, never NULL. */
 char *jb_take(json_buf *b, size_t *len)
 {
     char *out;
@@ -66,6 +86,14 @@ char *jb_take(json_buf *b, size_t *len)
     return out;
 }
 
+/* Separator/nesting bookkeeping, so callers emit values without tracking
+ * commas. need_comma[depth] means "this container already holds a value": so
+ * pre_value() inserts the leading ',' before the next one and post_value()
+ * sets the flag once a value lands. push()/pop() keep need_comma per nesting
+ * level, so closing a container restores the parent's state. suppress_comma is
+ * the lone exception — a value right after jb_key() must not add its own ','
+ * (the key already wrote the separator and the colon), so jb_key sets it to
+ * skip exactly the next pre_value(). */
 static void pre_value(json_buf *b)
 {
     if (b->suppress_comma) { b->suppress_comma = 0; return; }
@@ -95,27 +123,64 @@ void jb_obj_close(json_buf *b) { jb_putc(b, '}'); pop(b); }
 void jb_arr_open(json_buf *b) { pre_value(b); jb_putc(b, '['); push(b); }
 void jb_arr_close(json_buf *b) { jb_putc(b, ']'); pop(b); }
 
-/* Emit a JSON string literal (quotes + escaping). */
+/* Length (1-4) of the valid UTF-8 sequence beginning at s, or 0 if s[0]
+ * does not start one. Rejects overlong encodings, UTF-16 surrogates, and
+ * code points above U+10FFFF. The string is NUL-terminated, and NUL is
+ * never a valid continuation byte, so the lookahead never reads past it. */
+static int utf8_seq_len(const unsigned char *s)
+{
+    unsigned char c = s[0];
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) {                      /* 110xxxxx: 2 bytes */
+        if (c < 0xC2) return 0;                    /* overlong */
+        if ((s[1] & 0xC0) != 0x80) return 0;
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0) {                      /* 1110xxxx: 3 bytes */
+        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80) return 0;
+        if (c == 0xE0 && s[1] < 0xA0) return 0;     /* overlong */
+        if (c == 0xED && s[1] >= 0xA0) return 0;    /* surrogate half */
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0) {                      /* 11110xxx: 4 bytes */
+        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80 || (s[3] & 0xC0) != 0x80) return 0;
+        if (c == 0xF0 && s[1] < 0x90) return 0;     /* overlong */
+        if (c > 0xF4 || (c == 0xF4 && s[1] >= 0x90)) return 0;  /* > U+10FFFF */
+        return 4;
+    }
+    return 0;
+}
+
+/* Emit a JSON string literal (quotes + escaping). Valid UTF-8 passes
+ * through verbatim; an invalid byte becomes U+FFFD so a listing of a
+ * filename with bad bytes is still well-formed JSON. */
 static void emit_string(json_buf *b, const char *s)
 {
+    const unsigned char *p = (const unsigned char *)s;
     jb_putc(b, '"');
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
+    while (*p) {
+        unsigned char c = *p;
         switch (c) {
-            case '"':  jb_puts(b, "\\\""); break;
-            case '\\': jb_puts(b, "\\\\"); break;
-            case '\b': jb_puts(b, "\\b");  break;
-            case '\f': jb_puts(b, "\\f");  break;
-            case '\n': jb_puts(b, "\\n");  break;
-            case '\r': jb_puts(b, "\\r");  break;
-            case '\t': jb_puts(b, "\\t");  break;
+            case '"':  jb_puts(b, "\\\""); p++; break;
+            case '\\': jb_puts(b, "\\\\"); p++; break;
+            case '\b': jb_puts(b, "\\b");  p++; break;
+            case '\f': jb_puts(b, "\\f");  p++; break;
+            case '\n': jb_puts(b, "\\n");  p++; break;
+            case '\r': jb_puts(b, "\\r");  p++; break;
+            case '\t': jb_puts(b, "\\t");  p++; break;
             default:
                 if (c < 0x20) {
                     char u[7];
                     snprintf(u, sizeof u, "\\u%04x", (unsigned)c);
                     jb_puts(b, u);
+                    p++;
+                } else if (c < 0x80) {
+                    jb_putc(b, (char)c);            /* ASCII */
+                    p++;
                 } else {
-                    jb_putc(b, (char)c);   /* pass UTF-8 bytes through */
+                    int n = utf8_seq_len(p), i;
+                    if (n == 0) { jb_puts(b, "\\ufffd"); p++; }   /* invalid byte */
+                    else { for (i = 0; i < n; i++) jb_putc(b, (char)p[i]); p += n; }
                 }
         }
     }

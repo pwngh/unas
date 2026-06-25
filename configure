@@ -1,4 +1,13 @@
 #!/bin/sh
+# @pwngh/unas
+#
+# Copyright (c) Preston Neal
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE.md file in the root directory of this source tree.
+#
+# @license MIT
+
 #
 # configure - probe the local environment and generate config.mk.
 #
@@ -28,18 +37,23 @@ set -u
 # ---------------------------------------------------------------------------
 prefix=
 werror=0
+rng=auto
 for arg
 do
     case $arg in
     -h|--help)
         cat <<'USAGE'
-usage: ./configure [--prefix=DIR] [--werror]
+usage: ./configure [--prefix=DIR] [--werror] [--rng=NAME]
 
   --prefix=DIR  installation prefix, written to config.mk
                 (default /usr/local; `make PREFIX=DIR install` works too)
   --werror      append -Werror to the generated CFLAGS. Off by default:
                 future compilers invent new warnings, and a clean
                 tarball must keep building. Maintainers and CI want it.
+  --rng=NAME    entropy backend: auto (default), arc4random, or getrandom.
+                auto prefers arc4random_buf, else getrandom. Forcing one is
+                mainly for CI, to compile and run the getrandom path on a
+                glibc that also exposes arc4random_buf.
 
 Environment: CC, CFLAGS, CPPFLAGS, LDFLAGS, LDLIBS are honored, used in
 the probes, and recorded in config.mk.
@@ -48,6 +62,10 @@ USAGE
         ;;
     --prefix=*) prefix=${arg#--prefix=} ;;
     --werror)   werror=1 ;;
+    --rng=*)    rng=${arg#--rng=}
+        case $rng in auto|arc4random|getrandom) ;;
+        *) echo "configure: error: --rng must be auto, arc4random, or getrandom" >&2; exit 1 ;;
+        esac ;;
     *)
         echo "configure: error: unknown option: $arg (try --help)" >&2
         exit 1
@@ -146,8 +164,14 @@ echo "  cc:             ok ($CC, flags: $BASE_CFLAGS)"
 # for config.mk so the two cannot drift. _FILE_OFFSET_BITS=64 gives a
 # 64-bit off_t on ILP32 platforms (a file server must handle >2 GiB
 # files); it is harmlessly ignored where off_t is already 64-bit.
+#
+# COMPAT_CPP also defines _DEFAULT_SOURCE: under -std=c99 glibc sets
+# __STRICT_ANSI__, which hides arc4random_buf and getrandom behind
+# __USE_MISC — so without it the compat TU calls them undeclared (a warning
+# today, a hard error on gcc-14). macOS exposes them in the default
+# namespace and ignores the macro. The compat TU still omits _POSIX_C_SOURCE.
 CORE_CPP="-D_POSIX_C_SOURCE=200809L -D_FILE_OFFSET_BITS=64 -Isrc/core -Isrc/compat"
-COMPAT_CPP="-D_FILE_OFFSET_BITS=64 -Isrc/compat"
+COMPAT_CPP="-D_DEFAULT_SOURCE -D_FILE_OFFSET_BITS=64 -Isrc/compat"
 
 STRICT="$BASE_CFLAGS $CORE_CPP $CPPFLAGS $LDFLAGS"
 COMPAT="$BASE_CFLAGS $COMPAT_CPP $CPPFLAGS $LDFLAGS"
@@ -218,31 +242,32 @@ fi
 echo '  gmtime_r:       ok'
 
 # --- Entropy source (bearer-token minting) ---------------------------------
-# Prefer arc4random_buf (BSD/macOS: never fails, no fd); else getrandom
-# (Linux). compat/random.c selects on these macros; one MUST be present.
+# auto: prefer arc4random_buf (BSD/macOS: never fails, no fd); else getrandom
+# (Linux). --rng=NAME forces one (CI uses --rng=getrandom to compile and run
+# that branch on a glibc that also exposes arc4random_buf). One MUST be
+# present; compat/random.c selects on these macros.
 #
-# CRITICAL (the layered model's "separation rule"): these are NON-POSIX OS
-# extras. Defining _POSIX_C_SOURCE hides arc4random_buf on macOS and gates
-# getrandom on glibc, so we probe — and later compile compat/ — WITHOUT the
-# POSIX feature macro, with the same flags the compat TU is built with.
-# The default namespace exposes the platform RNG; the rest of the tree
-# stays strictly POSIX.
+# These are non-POSIX OS extras (the layered model's separation rule).
+# The compat TU is built with COMPAT_CPP — no _POSIX_C_SOURCE, plus
+# _DEFAULT_SOURCE (see the COMPAT_CPP note above) — so the platform RNG is
+# in the visible namespace; the probes use those same flags so they cannot
+# drift from the build. The rest of the tree stays strictly POSIX.
 HAVE_ARC4RANDOM=0
 HAVE_GETRANDOM=0
-if compiles "$COMPAT" "$LDLIBS" '
+if { [ "$rng" = auto ] || [ "$rng" = arc4random ]; } && compiles "$COMPAT" "$LDLIBS" '
 #include <stdlib.h>
 int main(void){ unsigned char b[4]; arc4random_buf(b,sizeof b); return (int)b[0]; }
 '; then
     HAVE_ARC4RANDOM=1
     echo '  entropy:        ok (arc4random_buf)'
-elif compiles "$COMPAT" "$LDLIBS" '
+elif { [ "$rng" = auto ] || [ "$rng" = getrandom ]; } && compiles "$COMPAT" "$LDLIBS" '
 #include <sys/random.h>
 int main(void){ unsigned char b[4]; return getrandom(b,sizeof b,0)<0?1:(int)b[0]; }
 '; then
     HAVE_GETRANDOM=1
     echo '  entropy:        ok (getrandom)'
 else
-    echo 'configure: error: no entropy source (neither arc4random_buf nor getrandom; see config.log)' >&2
+    echo "configure: error: no entropy source for --rng=$rng (see config.log)" >&2
     echo '  Wrap your platform RNG in src/compat/random.c and add a -DHAVE_* macro.' >&2
     exit 1
 fi

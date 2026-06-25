@@ -1,3 +1,14 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/jsonw.h — unas's small JSON builder.
  *
  * Used only for the JSON envelope (listings, /v1/status, /v1/shares, and
@@ -25,8 +36,9 @@
  *     jb_obj_close(&b);
  *     size_t n; char *s = jb_take(&b, &n);   // caller owns s
  *
- * On allocation failure b.err is set; all further calls are no-ops and
- * jb_take returns NULL. Always check b.err (or a NULL from jb_take).
+ * On a failure (allocation OOM, or nesting past JB_MAX_DEPTH) b.err is set;
+ * all further calls are no-ops and jb_take returns NULL. Always check b.err
+ * (or a NULL from jb_take).
  * ==================================================================== */
 
 #define JB_MAX_DEPTH 32
@@ -35,7 +47,7 @@ typedef struct {
     char         *buf;
     size_t        len;
     size_t        cap;
-    int           err;                 /* nonzero after an allocation failure */
+    int           err;                 /* nonzero after a failure: allocation OOM or depth overflow (JB_MAX_DEPTH) */
     int           depth;
     int           suppress_comma;      /* set by jb_key; next value skips ',' */
     unsigned char need_comma[JB_MAX_DEPTH + 1];

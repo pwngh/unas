@@ -1,3 +1,12 @@
+# @pwngh/unas
+#
+# Copyright (c) Preston Neal
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE.md file in the root directory of this source tree.
+#
+# @license MIT
+
 # Makefile — POSIX make. Run ./configure first (it writes config.mk).
 #
 # The `.POSIX:` first target engages strict POSIX semantics in BSD make
@@ -5,8 +14,8 @@
 # Makefile never invokes ./configure — that is a deliberate manual step.
 #
 # Artifacts:
-#   libunas.a   the engine (jsonw, http, net, fsapi, entropy) — the
-#               sacred C99/POSIX core, reusable and unit-testable.
+#   libunas.a   the engine (jsonw, http, net, fsapi, random) — the
+#               C99/POSIX core, reusable and unit-testable.
 #   unasd       the daemon: jails a share root, serves the HTTP file API.
 #
 #   ./configure && make && make test
@@ -81,11 +90,13 @@ src/core/unasd.o: src/core/unasd.c src/core/http.h src/core/net.h src/core/fsapi
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ src/core/unasd.c
 
 # ---------------------------------------------------------------------
-# Tests: C unit binaries linked against libunas.a + a POSIX sh driver
-# that curls the running daemon. `make test` fails if any assert fails.
+# Tests: C unit binaries linked against libunas.a, a static doc-drift guard
+# (check-docs.sh), and a POSIX sh driver that curls the running daemon.
+# `make test` fails if any assert fails.
 # ---------------------------------------------------------------------
 API_TESTS = tests/api/test_pathjail \
-            tests/api/test_http
+            tests/api/test_http \
+            tests/api/test_jsonw
 
 tests/api/test_pathjail: tests/api/test_pathjail.c libunas.a config.mk
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ tests/api/test_pathjail.c libunas.a $(LDLIBS)
@@ -93,9 +104,14 @@ tests/api/test_pathjail: tests/api/test_pathjail.c libunas.a config.mk
 tests/api/test_http: tests/api/test_http.c libunas.a config.mk
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ tests/api/test_http.c libunas.a $(LDLIBS)
 
+tests/api/test_jsonw: tests/api/test_jsonw.c libunas.a config.mk
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ tests/api/test_jsonw.c libunas.a $(LDLIBS)
+
 test: unasd $(API_TESTS)
 	./tests/api/test_pathjail
 	./tests/api/test_http
+	./tests/api/test_jsonw
+	sh ./tests/check-docs.sh
 	./tests/run.sh
 
 # POSIX utilities only: install(1) is a BSD/GNU extension, and the SysV

@@ -1,3 +1,14 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/net.h — TCP listener. C99 + POSIX.1-2008.
  *
  * A tiny wrapper over getaddrinfo/socket/bind/listen so unasd can bind a

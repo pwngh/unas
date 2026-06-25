@@ -1,10 +1,21 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/unasd.c — the unas daemon: jail a share root, serve the HTTP
  * file API over TCP. Strict C99 + POSIX.1-2008.
  *
- * Shape: bind a listener, fork one child per connection (SIGCHLD ignored
- * so children auto-reap), parse one request, run the router, close. The
- * router is a single function over the fsapi syscall wrappers. See
- * README.md for the surface.
+ * Shape: bind a listener, fork one child per connection (capped by
+ * UNAS_MAX_CONN; a SIGCHLD reaper counts and reaps the children), parse
+ * one request, run the router, close. The router is a single function
+ * over the fsapi syscall wrappers. See README.md for the surface.
  */
 #include "http.h"
 #include "net.h"
@@ -25,6 +36,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 
 #define PATHCAP 4096
 
@@ -38,6 +52,7 @@ typedef struct {
     const char     *token;    /* bearer token; required on all routes but /healthz */
     const char     *addr;     /* bind address, echoed by /v1/status          */
     int             port;     /* bound TCP port (resolved when 0 was asked)   */
+    int             io_timeout; /* per-connection socket idle timeout, seconds */
     struct timespec start;    /* CLOCK_MONOTONIC at startup, for uptime_s     */
     const char     *version;  /* server version string                        */
 } unas_server;
@@ -81,7 +96,9 @@ static const char *guess_ctype(const char *path)
 
 /* ====================================================================
  * errno -> HTTP status + name (the closed error set from the README).
- * One table so the status and the symbol can never drift apart.
+ * One table so the status and the symbol stay in lockstep in the code;
+ * the README copy of this set is a separate transcription — tests/check-docs.sh
+ * fails `make test` if the two diverge.
  * ==================================================================== */
 
 static const struct { int e; int http; const char *name; } ERRMAP[] = {
@@ -153,16 +170,24 @@ static void reply_errno(http_conn *c, int e, const char *path)
 
 static void reply_auth(http_conn *c)
 {
-    const char *body =
-        "{\"error\":{\"code\":\"EAUTH\",\"http\":401,"
-        "\"message\":\"missing or invalid bearer token\"}}";
+    /* Same envelope as every other error (one source: problem_json), with
+     * path omitted so an auth failure reveals nothing about the target.
+     * The WWW-Authenticate header is the lone auth-specific addition. */
+    char *body = problem_json(401, "EAUTH", NULL, "missing or invalid bearer token");
     http_send(c, 401, "Unauthorized", "application/json; charset=utf-8",
-              "WWW-Authenticate: Bearer\r\n", body, strlen(body));
+              "WWW-Authenticate: Bearer\r\n", body, body ? strlen(body) : 0);
+    free(body);
 }
 
-static void reply_405(http_conn *c, const char *path)
+/* RFC 7231: a 405 MUST carry Allow. `allow` is the method list for the route. */
+static void reply_405(http_conn *c, const char *path, const char *allow)
 {
-    reply_problem(c, 405, "EMETHOD", path, "unsupported method");
+    char hdr[128], *body;
+    snprintf(hdr, sizeof hdr, "Allow: %s\r\n", allow);
+    body = problem_json(405, "EMETHOD", path, "unsupported method");
+    http_send(c, 405, "Method Not Allowed", "application/json; charset=utf-8",
+              hdr, body, body ? strlen(body) : 0);
+    free(body);
 }
 
 /* HEAD on a JSON endpoint: status + content-type, empty body. */
@@ -250,6 +275,10 @@ static void serve_file(http_conn *c, const char *abspath, const struct stat *st,
 
     http_send_headers(c, partial ? 206 : 200, NULL, hdrs);
     if (is_head) { (void)close(fd); return; }
+    /* Headers (with Content-Length) are already committed past this point, so a
+     * seek or read failure below can only truncate the body — there is no way
+     * left to signal an error. Unreachable in practice: regular file just
+     * stat'd, offset already validated against size. */
     if (partial && lseek(fd, (off_t)start, SEEK_SET) == (off_t)-1) { (void)close(fd); return; }
 
     {
@@ -329,13 +358,14 @@ static void dispatch_fs(const unas_server *srv, http_conn *c, http_request *r,
             http_send_json(c, 200, js); free(js); return;
         }
         if (S_ISDIR(st.st_mode)) { reply_problem(c, 409, "EISDIR", disp, "is a directory; append a trailing slash to list"); return; }
-        if (!S_ISREG(st.st_mode)) { reply_problem(c, 409, "EINVAL", disp, "not a regular file"); return; }
+        if (!S_ISREG(st.st_mode)) { reply_problem(c, 400, "EINVAL", disp, "not a regular file"); return; }
         serve_file(c, abspath, &st, head, http_header_get(r, "Range"), disp);
         return;
     }
 
     if (strcmp(m, "PUT") == 0) {
         char loc[PATHCAP + 32];
+        bool excl = false;
         if (is_dir) {
             if (have && S_ISDIR(st.st_mode)) { http_send(c, 204, "No Content", NULL, NULL, NULL, 0); return; }
             if (have)                        { reply_problem(c, 409, "ENOTDIR", disp, "path exists and is not a directory"); return; }
@@ -348,7 +378,8 @@ static void dispatch_fs(const unas_server *srv, http_conn *c, http_request *r,
         {
             const char *inm = http_header_get(r, "If-None-Match");
             const char *im  = http_header_get(r, "If-Match");
-            if (inm && strcmp(inm, "*") == 0 && have) { reply_problem(c, 412, "EEXIST", disp, "exists (If-None-Match: *)"); return; }
+            excl = (inm && strcmp(inm, "*") == 0);       /* create-only: enforced atomically below */
+            if (excl && have) { reply_problem(c, 412, "EEXIST", disp, "exists (If-None-Match: *)"); return; }
             if (im && (!have || !if_match_ok(&st, im))) { reply_problem(c, 412, "EMISMATCH", disp, "ETag does not match (If-Match)"); return; }
         }
         if (r->content_length < 0) { reply_problem(c, 411, "ELENGTH", disp, "Content-Length required"); return; }
@@ -360,7 +391,8 @@ static void dispatch_fs(const unas_server *srv, http_conn *c, http_request *r,
         {
             const char *pre; size_t pren;
             http_body_prefix(c, &pre, &pren);
-            if (fsapi_write_stream(abspath, c->fd, pre, pren, r->content_length) != 0) {
+            if (fsapi_write_stream(abspath, c->fd, pre, pren, r->content_length, excl) != 0) {
+                if (excl && errno == EEXIST) { reply_problem(c, 412, "EEXIST", disp, "exists (If-None-Match: *)"); return; }
                 reply_errno(c, errno, disp); return;
             }
         }
@@ -388,11 +420,13 @@ static void dispatch_fs(const unas_server *srv, http_conn *c, http_request *r,
         const char *dst = http_header_get(r, "Destination");
         const char *dsub;
         char dabs[PATHCAP], loc[PATHCAP + 32];
-        bool ddir = false;
         if (!dst) { reply_problem(c, 400, "EINVAL", disp, "Destination header required"); return; }
         dsub = dest_subpath(dst);
         if (!dsub) { reply_problem(c, 400, "EINVAL", disp, "Destination must target /v1/fs/..."); return; }
-        if (fsapi_resolve(srv->root, dsub, dabs, sizeof dabs, &ddir) != 0) { reply_errno(c, errno, dsub); return; }
+        /* The destination's dir-ness is irrelevant: rename/copy act on the
+         * resolved path regardless, so pass NULL for is_dir. */
+        if (fsapi_resolve(srv->root, dsub, dabs, sizeof dabs, NULL) != 0) { reply_errno(c, errno, dsub); return; }
+        if (fsapi_contained(srv->root, dabs) != 0) { reply_problem(c, 403, "EACCES", dsub, "destination escapes the share root"); return; }
         if (!have) { reply_problem(c, 404, "ENOENT", disp, "source not found"); return; }
         {
             const char *im = http_header_get(r, "If-Match");
@@ -405,7 +439,7 @@ static void dispatch_fs(const unas_server *srv, http_conn *c, http_request *r,
         return;
     }
 
-    reply_405(c, disp);
+    reply_405(c, disp, "GET, HEAD, PUT, DELETE, MOVE, COPY");
 }
 
 /* ====================================================================
@@ -496,6 +530,8 @@ static bool authed(const unas_server *srv, const http_request *r)
 
 static void handle_request(const unas_server *srv, http_conn *c, http_request *r)
 {
+    /* /healthz is the one route served before the auth gate: a liveness probe
+     * must answer without carrying the bearer token. */
     if (strcmp(r->path, "/healthz") == 0) {
         http_send(c, 200, "OK", "text/plain; charset=utf-8", NULL, "ok\n", 3);
         return;
@@ -505,13 +541,13 @@ static void handle_request(const unas_server *srv, http_conn *c, http_request *r
     if (strcmp(r->path, "/v1/status") == 0) {
         if (strcmp(r->method, "GET") == 0 || strcmp(r->method, "HEAD") == 0)
             reply_status(srv, c, r->method[0] == 'H');
-        else reply_405(c, r->path);
+        else reply_405(c, r->path, "GET, HEAD");
         return;
     }
     if (strcmp(r->path, "/v1/shares") == 0) {
         if (strcmp(r->method, "GET") == 0 || strcmp(r->method, "HEAD") == 0)
             reply_shares(srv, c, r->method[0] == 'H');
-        else reply_405(c, r->path);
+        else reply_405(c, r->path, "GET, HEAD");
         return;
     }
     if (strncmp(r->path, "/v1/fs", 6) == 0 && (r->path[6] == '\0' || r->path[6] == '/')) {
@@ -522,10 +558,30 @@ static void handle_request(const unas_server *srv, http_conn *c, http_request *r
             reply_errno(c, errno, sub[0] ? sub : "/");
             return;
         }
+        if (fsapi_contained(srv->root, abspath) != 0) {
+            reply_problem(c, 403, "EACCES", sub[0] ? sub : "/", "path escapes the share root");
+            return;
+        }
         dispatch_fs(srv, c, r, sub, abspath, is_dir);
         return;
     }
     reply_problem(c, 404, "ENOENT", r->path, "no such endpoint");
+}
+
+/* Bound how long one connection may stall with no progress at all, so a
+ * client that opens a socket and goes silent cannot pin a forked worker
+ * indefinitely. Arms per recv/send and resets on each transfer, so it caps
+ * idle stalls only — a slow but steady drip stays inside the window (not a
+ * slowloris defense). Concurrent workers are separately bounded by
+ * UNAS_MAX_CONN; front with a proxy for public exposure. */
+static void set_io_timeout(int fd, int secs)
+{
+    struct timeval tv;
+    if (secs <= 0) return;
+    tv.tv_sec = secs;
+    tv.tv_usec = 0;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
 
 static void serve_conn(const unas_server *srv, int fd)
@@ -534,6 +590,7 @@ static void serve_conn(const unas_server *srv, int fd)
     http_request r;
     char err[160];
     int rc;
+    set_io_timeout(fd, srv->io_timeout);
     http_conn_init(&c, fd);
     rc = http_read_request(&c, &r, err, sizeof err);
     if (rc == 1) return;                                  /* idle close */
@@ -574,7 +631,9 @@ static int read_token_file(const char *path, char *out, size_t outn)
     return out[0] ? 0 : -1;
 }
 
-/* Best-effort: drop the chosen port and token where a UI can read them. */
+/* Best-effort: drop the chosen port and token where a UI can read them. The
+ * token file is created 0600 (owner-only) — it persists the bearer secret to
+ * disk. O_TRUNC reuse keeps a pre-existing file's looser mode. */
 static void write_state(const char *dir, int port, const char *token)
 {
     char p[PATHCAP], line[300];
@@ -597,8 +656,39 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
         "usage: %s [--addr HOST] [--port N] [--token TOK | --token-file F] <share-root>\n"
-        "  env: UNAS_ROOT UNAS_ADDR UNAS_PORT UNAS_TOKEN UNAS_TOKEN_FILE UNAS_STATE\n",
+        "  env: UNAS_ROOT UNAS_ADDR UNAS_PORT UNAS_TOKEN UNAS_TOKEN_FILE UNAS_STATE UNAS_IO_TIMEOUT UNAS_MAX_CONN\n",
         prog);
+}
+
+/* Live forked children, maintained by the SIGCHLD reaper so the accept loop
+ * can enforce a concurrency cap. volatile sig_atomic_t: touched by both the
+ * handler and main. */
+static volatile sig_atomic_t live_children = 0;
+
+/* SIGCHLD reaper. A concurrency cap needs an exit count, so we cannot use
+ * SIG_IGN auto-reaping (it gives no notification). The WNOHANG loop coalesces
+ * several exits delivered as one signal; errno is saved/restored because waitpid
+ * clobbers it and this runs asynchronously between any two statements in main. */
+static void reap_children(int sig)
+{
+    int saved = errno;
+    (void)sig;
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        if (live_children > 0) live_children--;
+    errno = saved;
+}
+
+/* At-capacity reject: a 503 written without forking, so a flood cannot stall
+ * the accept loop. No request is read; the connection closes after. */
+static void reply_busy(int fd)
+{
+    http_conn c;
+    char *body;
+    http_conn_init(&c, fd);
+    body = problem_json(503, "EBUSY", NULL, "too many concurrent connections");
+    http_send(&c, 503, "Service Unavailable", "application/json; charset=utf-8",
+              "Retry-After: 1\r\n", body, body ? strlen(body) : 0);
+    free(body);
 }
 
 int main(int argc, char **argv)
@@ -609,10 +699,12 @@ int main(int argc, char **argv)
     const char *tokenfile = getenv("UNAS_TOKEN_FILE");
     const char *root = getenv("UNAS_ROOT");
     const char *state = getenv("UNAS_STATE");
+    const char *iotmo = getenv("UNAS_IO_TIMEOUT");
+    const char *mconn = getenv("UNAS_MAX_CONN");
     char root_buf[PATHCAP], token_buf[256];
     char err[256], nerr[256];
     unas_server srv;
-    int lfd, bound = 0, i;
+    int lfd, bound = 0, i, max_children;
     struct sigaction sa;
 
     if (!addr || !*addr) addr = "127.0.0.1";
@@ -651,7 +743,9 @@ int main(int argc, char **argv)
     sa.sa_handler = SIG_IGN;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGPIPE, &sa, NULL);
-    sigaction(SIGCHLD, &sa, NULL);          /* children auto-reap (POSIX) */
+    sa.sa_handler = reap_children;          /* count + reap children for the cap */
+    sa.sa_flags   = SA_NOCLDSTOP;           /* deliver on child exit, not on stop */
+    sigaction(SIGCHLD, &sa, NULL);
 
     lfd = net_listen(addr, port, &bound, nerr, sizeof nerr);
     if (lfd < 0) { fprintf(stderr, "unas: %s\n", nerr); return 1; }
@@ -661,6 +755,7 @@ int main(int argc, char **argv)
     srv.token   = token_buf;
     srv.addr    = addr;
     srv.port    = bound;
+    srv.io_timeout = (iotmo && *iotmo) ? atoi(iotmo) : 30;
     srv.version = "unas/1.0";
     srv.start.tv_sec = 0; srv.start.tv_nsec = 0;
     (void)clock_gettime(CLOCK_MONOTONIC, &srv.start);
@@ -671,13 +766,30 @@ int main(int argc, char **argv)
     printf("PORT=%d\nTOKEN=%s\n", bound, srv.token);
     fflush(stdout);
 
+    /* Bound concurrent children so a flood cannot fork the box to death.
+     * 0 = unlimited; default 256 is far above any legitimate single-host load. */
+    max_children = (mconn && *mconn) ? atoi(mconn) : 256;
+    if (max_children < 0) max_children = 0;
+
     for (;;) {
         int cfd = net_accept(lfd);
         pid_t pid;
+        sigset_t block, prev;
         if (cfd < 0) { if (errno == EINTR) continue; break; }
+        if (max_children > 0 && live_children >= max_children) {
+            set_io_timeout(cfd, srv.io_timeout);          /* a non-reading client must not stall the reject */
+            reply_busy(cfd); close(cfd); continue;        /* at capacity: 503, no fork */
+        }
+        /* Block SIGCHLD across fork + increment so a child that exits instantly
+         * cannot have the reaper decrement live_children before we count it
+         * (the classic fork/SIGCHLD counter race). */
+        sigemptyset(&block); sigaddset(&block, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &block, &prev);
         pid = fork();
-        if (pid < 0) { serve_conn(&srv, cfd); close(cfd); continue; }   /* degraded: inline */
-        if (pid == 0) { close(lfd); serve_conn(&srv, cfd); close(cfd); _exit(0); }
+        if (pid < 0) { sigprocmask(SIG_SETMASK, &prev, NULL); serve_conn(&srv, cfd); close(cfd); continue; }  /* degraded: inline */
+        if (pid == 0) { sigprocmask(SIG_SETMASK, &prev, NULL); close(lfd); serve_conn(&srv, cfd); close(cfd); _exit(0); }
+        live_children++;
+        sigprocmask(SIG_SETMASK, &prev, NULL);
         close(cfd);
     }
     close(lfd);

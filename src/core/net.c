@@ -1,3 +1,14 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/net.c — TCP listener. Strict C99 + POSIX.1-2008. */
 #include "net.h"
 
@@ -23,18 +34,24 @@ int net_listen(const char *host, const char *port, int *out_port,
     int fd = -1, rc, yes = 1;
 
     memset(&hints, 0, sizeof hints);
-    hints.ai_family   = AF_UNSPEC;       /* v4 or v6 */
+    /* AF_UNSPEC + AI_PASSIVE + NULL node (host NULL/"") yields both v4 and
+     * v6 wildcard candidates to try in turn; an explicit host narrows it. */
+    hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags    = AI_PASSIVE;
 
     rc = getaddrinfo((host && *host) ? host : NULL, port, &hints, &res);
     if (rc != 0) {
+        /* getaddrinfo's codes are not errno: format with gai_strerror, not
+         * seterr()/strerror, or the message is garbage. */
         if (err && errn) snprintf(err, errn, "getaddrinfo: %s", gai_strerror(rc));
         return -1;
     }
     for (ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
+        /* Best-effort (failure is ignored): lets a restart re-bind the port
+         * while a previous socket lingers in TIME_WAIT. */
         (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
         if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
         close(fd);

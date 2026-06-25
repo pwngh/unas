@@ -1,7 +1,19 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/compat/random.c — OS entropy backend (Layer 3: detect + wrap).
  *
- * Compiled WITHOUT _POSIX_C_SOURCE (COMPAT_CFLAGS/COMPAT_CPPFLAGS in the
- * Makefile) so the platform RNG is in the visible namespace:
+ * Compiled with COMPAT_CPPFLAGS (config.mk): no _POSIX_C_SOURCE, plus
+ * _DEFAULT_SOURCE so the platform RNG is visible — glibc otherwise hides
+ * arc4random_buf/getrandom behind __USE_MISC under -std=c99:
  *
  *   - arc4random_buf  (BSD, macOS) — never fails, needs no fd or init.
  *   - getrandom       (Linux >= 3.17, glibc >= 2.25) — blocks until the

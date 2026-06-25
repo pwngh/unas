@@ -1,3 +1,14 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/http.c — HTTP/1.1 request parse + response writer. C99/POSIX. */
 #include "http.h"
 
@@ -76,6 +87,9 @@ static void parse_request_line(http_request *r, const char *line, size_t n)
     while (i < n && line[i] != ' ') i++;
     te = i;
     copy_bounded(r->target, sizeof r->target, line + ts, te - ts);
+    /* Whatever follows the target (the HTTP-version token) is left
+     * unread: the server always answers HTTP/1.1 and closes, so the
+     * client's version never changes a response. */
     /* path = target up to '?' */
     {
         const char *q = memchr(r->target, '?', strlen(r->target));
@@ -159,6 +173,28 @@ int http_read_request(http_conn *c, http_request *r, char *err, size_t errn)
 
     if (r->method[0] == '\0' || r->path[0] == '\0') {
         if (err && errn) snprintf(err, errn, "malformed request line");
+        return -1;
+    }
+
+    /* Reject a request bearing more than one Content-Length: the two values
+     * can disagree (a request-smuggling lever) and there is no safe single
+     * answer. RFC 7230 §3.3.2 permits a 400 here, which serve_conn returns. */
+    {
+        size_t i, ncl = 0;
+        for (i = 0; i < r->nheaders; i++)
+            if (strcasecmp(r->headers[i].name, "Content-Length") == 0) ncl++;
+        if (ncl > 1) {
+            if (err && errn) snprintf(err, errn, "duplicate Content-Length");
+            return -1;
+        }
+    }
+
+    /* A present-but-unparseable or negative Content-Length leaves the field at
+     * -1 in parse_header_line; reject it (400) rather than treating it as
+     * absent — which would answer 411 "Content-Length required" for a length
+     * the client did send. RFC 7230 §3.3.2 calls for rejecting an invalid CL. */
+    if (http_header_get(r, "Content-Length") && r->content_length < 0) {
+        if (err && errn) snprintf(err, errn, "malformed Content-Length");
         return -1;
     }
 

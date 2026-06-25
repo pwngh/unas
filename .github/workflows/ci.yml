@@ -1,0 +1,60 @@
+# @pwngh/unas
+#
+# Copyright (c) Preston Neal
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE.md file in the root directory of this source tree.
+#
+# @license MIT
+
+# CI — build and test across configs. The matrix builds with the auto-selected
+# entropy backend (arc4random_buf on modern macOS and glibc >= 2.36) under both
+# default and --werror flags. The `getrandom` job forces --rng=getrandom on
+# Linux so that backend is actually compiled and run (auto picks arc4random on
+# current glibc). `make test` runs the unit binaries, the errno<->README drift
+# guard, and the curl-driven e2e.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: the workflow only reads the checkout.
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        werror: ['', '--werror']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: ./configure ${{ matrix.werror }}
+      - name: build
+        run: make
+      - name: test
+        run: make test
+
+  getrandom:
+    name: getrandom backend (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure (force getrandom)
+        run: ./configure --rng=getrandom
+      - name: build
+        run: make
+      - name: test
+        run: make test

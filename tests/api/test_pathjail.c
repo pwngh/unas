@@ -1,3 +1,14 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* tests/api/test_pathjail.c — the security-critical bit: fsapi_resolve
  * must never let a request escape the share root. Links libunas.a. */
 #include "fsapi.h"

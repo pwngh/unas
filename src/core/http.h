@@ -1,12 +1,24 @@
+/*
+ * @pwngh/unas
+ *
+ * Copyright (c) Preston Neal
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE.md file in the root directory of this source tree.
+ *
+ * @license MIT
+ */
+
 /* src/core/http.h — minimal HTTP/1.1 request parser + response writer.
  *
  * Just enough HTTP to be a clean file API: parse the request line and
  * headers into a fixed struct, expose the body as a stream (the bytes
  * already buffered past the headers, plus whatever remains on the fd),
  * and write responses. No chunked decoding, no keep-alive — one request
- * per connection, every response carries `Connection: close`. The bytes
- * of a file body never pass through this layer's buffers; the caller
- * streams them straight to/from disk.
+ * per connection, every response carries `Connection: close`. Aside from
+ * the prefix that shares the head's read (see http_body_prefix), file-body
+ * bytes never touch this layer's buffers; the caller streams the rest
+ * to/from disk.
  *
  * Strict C99 + POSIX.1-2008.
  */
@@ -42,7 +54,7 @@ typedef struct {
     char        path[HTTP_MAX_TARGET];     /* path only (query stripped) */
     http_header headers[HTTP_MAX_HEADERS];
     size_t      nheaders;
-    long long   content_length;            /* -1 if absent */
+    long long   content_length;            /* -1 if absent or unparseable */
 } http_request;
 
 void http_conn_init(http_conn *c, int fd);
