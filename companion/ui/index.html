@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>unas</title>
+<style>
+  :root {
+    --bg: #2a2927;        --card: #323130;      --card2: #3a3937;
+    --line: rgba(255,255,255,0.10);
+    --text: #f4f3ee;      --muted: #a9a7a0;     --faint: #84827c;
+    --info-bg: #213a57;   --info: #8fc0f4;      --info-strong: #b6d6fb;  --accent: #2f6fd0;
+    --ok: #5cc46b;        --bad: #e2685f;
+    --mono: ui-monospace, "SF Mono", "Menlo", "Cascadia Mono", monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; font-family: var(--sans); -webkit-user-select: none; user-select: none; }
+  body { padding: 9px 12px 14px; color: var(--text); font-size: 13px; }
+  .caret { width: 14px; height: 14px; background: var(--card); position: absolute; top: 3px; left: 50%;
+           margin-left: -7px; transform: rotate(45deg); border-radius: 3px 0 0 0; }
+  .card { position: relative; background: var(--card); border: 0.5px solid var(--line);
+          border-radius: 14px; padding: 13px 13px 11px; box-shadow: 0 12px 34px rgba(0,0,0,0.45); }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; min-width: 0; }
+  .ell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .icon { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2;
+          stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--info-bg);
+            color: var(--info); display: flex; align-items: center; justify-content: center; flex: none; }
+  .title { font-size: 15px; font-weight: 500; line-height: 1.2; }
+  .sub { font-size: 12px; color: var(--muted); }
+  .iconbtn { width: 30px; height: 30px; border-radius: 50%; border: 0.5px solid var(--line);
+             background: transparent; color: var(--muted); display: flex; align-items: center;
+             justify-content: center; cursor: pointer; flex: none; }
+  .iconbtn:hover { background: var(--card2); color: var(--text); }
+  .iconbtn .icon { width: 15px; height: 15px; }
+  .divider { height: 0.5px; background: var(--line); margin: 13px 0; }
+  /* status */
+  .pill { display: flex; align-items: center; gap: 10px; background: var(--info-bg); border-radius: 9px; padding: 10px 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; }
+  .pill .state { font-size: 14px; font-weight: 500; color: var(--info-strong); }
+  .pill .meta { font-size: 12px; color: var(--info); opacity: .85; }
+  .port { font-size: 12px; color: var(--info); font-family: var(--mono); }
+  .label { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 5px; }
+  .field { display: flex; align-items: center; gap: 8px; background: var(--card2); border-radius: 8px; padding: 8px 10px; }
+  .field .val { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; }
+  .field .val.muted { color: var(--muted); letter-spacing: 1px; }
+  .sbtn { width: 28px; height: 28px; border-radius: 8px; border: 0.5px solid var(--line); background: transparent;
+          color: var(--muted); display: flex; align-items: center; justify-content: center; cursor: pointer; flex: none; }
+  .sbtn:hover { background: var(--card); color: var(--text); }
+  .sbtn .icon { width: 15px; height: 15px; }
+  .caprow { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }
+  .bar { height: 6px; border-radius: 99px; background: var(--card2); overflow: hidden; }
+  .bar > div { height: 100%; background: var(--info); border-radius: 99px; transition: width .3s; }
+  .actions { display: flex; gap: 8px; margin-top: 14px; }
+  .btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; color: var(--text);
+         background: transparent; border: 0.5px solid var(--line); border-radius: 9px; padding: 9px 10px; cursor: pointer; font-family: var(--sans); }
+  .btn:hover { background: var(--card2); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn .icon { width: 15px; height: 15px; }
+  .btn.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 500; }
+  .btn.primary:hover { background: #3579dd; }
+  .btn.grow { flex: 1; } .btn.tight { flex: none; }
+  .footer { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding-top: 10px;
+            border-top: 0.5px solid var(--line); font-size: 12px; color: var(--faint); }
+  .footer .hz { display: flex; align-items: center; gap: 5px; }
+  .footer .hz .icon { width: 14px; height: 14px; color: var(--ok); }
+  .linkbtn { background: none; border: none; color: var(--info); font-size: 12px; cursor: pointer; padding: 6px 0 0; font-family: var(--sans); }
+  /* wizard */
+  .steps { display: flex; gap: 6px; margin: 12px 0 4px; }
+  .step { flex: 1; height: 3px; border-radius: 99px; background: var(--card2); }
+  .step.on { background: var(--accent); }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.5; margin: 8px 0 0; }
+  code { font-family: var(--mono); font-size: 12px; background: var(--card2); padding: 1px 5px; border-radius: 5px; color: var(--text); }
+  input.text { width: 100%; background: var(--card2); border: 0.5px solid var(--line); border-radius: 8px;
+               color: var(--text); font-family: var(--mono); font-size: 13px; padding: 9px 11px; outline: none; }
+  input.text:focus { border-color: var(--accent); }
+  .ok { color: var(--ok); } .err { color: var(--bad); }
+  .pathchip { display: flex; align-items: center; gap: 8px; background: var(--card2); border-radius: 8px; padding: 9px 11px;
+              font-family: var(--mono); font-size: 12px; }
+  .spinner { width: 24px; height: 24px; border: 3px solid var(--card2); border-top-color: var(--info);
+             border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .center { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 18px 6px 8px; text-align: center; }
+  .toast { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); background: #111; color: #fff;
+           font-size: 12px; padding: 5px 11px; border-radius: 7px; opacity: 0; transition: opacity .15s; pointer-events: none; }
+  .toast.show { opacity: .95; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="caret"></div>
+  <div class="card">
+    <!-- header (shared) -->
+    <div class="row">
+      <div class="avatar">
+        <svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
+      </div>
+      <div class="grow">
+        <div class="title">unas</div>
+        <div class="sub ell" id="subtitle">—</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- ============ STATUS VIEW ============ -->
+    <div id="view-status" hidden>
+      <div class="pill" id="pill">
+        <span class="dot"></span>
+        <div class="grow"><div class="state" id="state">Serving</div><div class="meta" id="meta"></div></div>
+        <span class="port" id="port"></span>
+      </div>
+      <div class="label">Base URL</div>
+      <div class="field">
+        <span class="val ell" id="baseurl">—</span>
+        <button class="sbtn" data-copy="baseurl" aria-label="Copy base URL"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+      </div>
+      <div class="label">Bearer token</div>
+      <div class="field">
+        <span class="val muted" id="token">••••••••••••</span>
+        <button class="sbtn" id="reveal" aria-label="Reveal token"><svg class="icon" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        <button class="sbtn" data-copy="token" aria-label="Copy token"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+      </div>
+      <div id="capwrap" hidden>
+        <div class="caprow"><span>Capacity</span><span id="capnum">—</span></div>
+        <div class="bar"><div id="capbar" style="width:0%"></div></div>
+      </div>
+      <div class="actions">
+        <button class="btn" id="open"><svg class="icon" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>Open share</button>
+        <button class="btn" id="curl"><svg class="icon" viewBox="0 0 24 24"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg>Copy curl</button>
+      </div>
+      <div class="footer">
+        <span id="ver" class="ell">unas</span>
+        <span class="hz"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>healthz ok</span>
+      </div>
+    </div>
+
+    <!-- ============ SETUP WIZARD ============ -->
+    <div id="view-setup" hidden>
+      <div class="steps"><span class="step on" id="s1"></span><span class="step" id="s2"></span></div>
+
+      <!-- step 1: connect -->
+      <div id="wiz-1">
+        <div class="label">Step 1 — connect your NAS</div>
+        <input class="text" id="smburl" placeholder="smb://UNAS-Pro.local/share" spellcheck="false" autocapitalize="off" />
+        <p class="hint">Enter the share address and mount it — your Mac handles the
+          login — then choose the mounted folder. Already mounted? Just choose it.</p>
+        <div class="actions">
+          <button class="btn primary grow" id="mount">Connect &amp; mount</button>
+          <button class="btn tight" id="choose1">Choose folder…</button>
+        </div>
+      </div>
+
+      <!-- step 2: point + start -->
+      <div id="wiz-2" hidden>
+        <div class="label">Step 2 — folder to serve</div>
+        <div class="pathchip"><svg class="icon" viewBox="0 0 24 24" style="width:15px;height:15px;color:var(--muted)"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span class="ell grow" id="chosen">—</span><button class="linkbtn" id="choose2" style="padding:0">change</button></div>
+        <div class="label">unas daemon</div>
+        <div class="pathchip"><span class="ell grow" id="unasd">looking…</span><button class="linkbtn" id="locate" style="padding:0" hidden>locate…</button></div>
+        <div class="actions">
+          <button class="btn tight" id="back2">Back</button>
+          <button class="btn primary grow" id="start" disabled>Start serving</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ BUSY / ERROR ============ -->
+    <div id="view-busy" hidden>
+      <div class="center">
+        <div class="spinner" id="spin"></div>
+        <svg class="icon" id="busyx" viewBox="0 0 24 24" style="width:26px;height:26px;color:var(--bad)" hidden><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+        <div>
+          <div class="title" id="busytitle" style="font-size:14px">Starting unas…</div>
+          <div class="hint" id="busymsg" style="margin-top:4px"></div>
+        </div>
+        <button class="btn" id="busyback" hidden style="flex:none">Reconfigure</button>
+      </div>
+    </div>
+
+    <!-- ============ REMOTE (Windows) ============ -->
+    <div id="view-remote" hidden>
+      <div class="center" style="padding:14px 4px 6px;">
+        <div class="avatar" style="width:40px;height:40px;">
+          <svg class="icon" viewBox="0 0 24 24" style="width:20px;height:20px;"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/></svg>
+        </div>
+        <div class="title" style="font-size:14px">Remote client</div>
+        <p class="hint" style="text-align:left;">unas's daemon runs on a macOS or Linux host (your NAS box) — it
+          can't run on Windows. Start the daemon there, then launch this app with
+          <code>UNAS_BASE</code> and <code>UNAS_TOKEN</code> set to point at it.</p>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div>
+<script src="main.js"></script>
+</body>
+</html>

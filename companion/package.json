@@ -1,0 +1,16 @@
+{
+  "name": "unas-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Menu-bar / tray status app for the unas daemon",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "sidecar": "sh build-daemon.sh",
+    "icon": "tauri icon app-icon.png",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

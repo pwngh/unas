@@ -1,0 +1,29 @@
+[package]
+name = "unas-companion"
+version = "0.1.0"
+description = "Menu-bar / tray status app for the unas daemon"
+authors = ["Preston Neal"]
+edition = "2021"
+
+# The lib holds the app logic; main.rs is a thin entry point so the same
+# code can target desktop and (later) mobile.
+[lib]
+name = "unas_companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Tiny synchronous HTTP client. default-features off drops TLS — we only
+# ever talk to the daemon over http on loopback.
+ureq = { version = "2", default-features = false, features = ["json"] }
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
