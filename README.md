@@ -225,6 +225,22 @@ $ curl -H "$A" localhost:8088/v1/shares
   "avail_bytes":762697428992,"scope":"pool"}]}
 ```
 
+## Desktop companion (menu bar / tray)
+
+There's an optional [companion app](companion/) for macOS, Windows, and
+Linux. On first run it walks you through setup — mount the share (your OS
+handles the login), then pick the folder to serve — and from then on it
+launches and supervises `unasd` for you and shows live status: serving
+state, the base URL, the bearer token (reveal + copy), and free space, with
+one click to open the share or copy a ready-to-run `curl`. It adds nothing
+to the daemon — it drives `unasd` and reads its HTTP API and `UNAS_STATE`
+files, the same surfaces any client uses.
+
+Built with [Tauri](https://tauri.app) — one small native binary per OS on
+the system webview, no bundled browser. See [companion/](companion/) to
+build and run it, or open `companion/ui/index.html` in a browser to preview
+the UI.
+
 ## Why it has to run on a host (not the NAS itself)
 
 UniFi OS is locked. The UNAS — and the new Enterprise NAS (ENAS) — expose
