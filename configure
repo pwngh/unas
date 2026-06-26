@@ -96,9 +96,12 @@ trap 'exit 1' HUP INT TERM
 # ---------------------------------------------------------------------------
 # compiles() — does a C snippet compile (and link) with the given flags?
 #   compiles "<cc flags>" "<libraries>" "<C source>"  -> 0 on success
-# Libraries go after the source file, where single-pass linkers need
-# them. Every attempt (command, snippet, diagnostics) lands in
-# config.log so a failed probe on a strange platform is debuggable.
+# Libraries go AFTER the source file on the command line. Many linkers
+# read left to right and remember a library only for code seen earlier,
+# so a -lfoo placed before the file that uses it is silently ignored;
+# putting it last is the order those linkers need. Every attempt
+# (command, snippet, diagnostics) lands in config.log so a failed probe
+# on a strange platform is debuggable.
 # ---------------------------------------------------------------------------
 compiles() {
     printf '%s\n' "$3" > "$_stage/test.c" || {
@@ -156,7 +159,7 @@ if [ "$werror" = 1 ]; then
     BASE_CFLAGS="$BASE_CFLAGS -Werror"
 fi
 if [ -n "$CFLAGS" ]; then
-    BASE_CFLAGS="$BASE_CFLAGS $CFLAGS"   # user flags last, so -O0/-g win
+    BASE_CFLAGS="$BASE_CFLAGS $CFLAGS"   # user flags go last; when two flags conflict the later one wins, so a user's -O0/-g overrides our -O2
 fi
 echo "  cc:             ok ($CC, flags: $BASE_CFLAGS)"
 

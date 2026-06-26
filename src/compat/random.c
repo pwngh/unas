@@ -11,16 +11,23 @@
 
 /* src/compat/random.c — OS entropy backend (Layer 3: detect + wrap).
  *
- * Compiled with COMPAT_CPPFLAGS (config.mk): no _POSIX_C_SOURCE, plus
- * _DEFAULT_SOURCE so the platform RNG is visible — glibc otherwise hides
- * arc4random_buf/getrandom behind __USE_MISC under -std=c99:
+ * Built with COMPAT_CPPFLAGS (config.mk): no _POSIX_C_SOURCE, plus
+ * _DEFAULT_SOURCE. Here's why that matters. Asking for strict C99
+ * (-std=c99) makes glibc set a "standards-only" flag (__STRICT_ANSI__)
+ * that hides anything outside the standard — including the OS random
+ * functions, which sit behind glibc's __USE_MISC group. Defining
+ * _DEFAULT_SOURCE re-opens that group, so the platform RNG becomes
+ * visible to this file:
  *
- *   - arc4random_buf  (BSD, macOS) — never fails, needs no fd or init.
- *   - getrandom       (Linux >= 3.17, glibc >= 2.25) — blocks until the
- *                     pool is initialized; we loop over short reads.
+ *   - arc4random_buf  (BSD, macOS) — never fails, needs no file handle
+ *                     or warm-up.
+ *   - getrandom       (Linux >= 3.17, glibc >= 2.25) — waits (blocks)
+ *                     until the kernel's randomness pool is seeded, then
+ *                     may hand back fewer bytes than asked, so we loop.
  *
- * ./configure selects exactly one via -DHAVE_*; the #error guards
- * against a misconfigured build silently producing a weak token.
+ * ./configure picks exactly one at build time via -DHAVE_*; the #error
+ * below stops a misconfigured build from quietly compiling with no
+ * backend and minting a guessable token.
  */
 #include "random.h"
 

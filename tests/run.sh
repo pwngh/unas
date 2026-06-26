@@ -160,7 +160,7 @@ RN=12
 RPIDS=""
 i=1; while [ $i -le $RN ]; do
     ( printf '%s\n' "$(code -H 'If-None-Match: *' --data-binary @"$REPO/tests/fixtures/hello.txt" -X PUT "$BASE/v1/fs/raced.txt")" > "$TMP/race/$i" ) &
-    RPIDS="$RPIDS $!"        # wait only the racers, not the long-lived daemon
+    RPIDS="$RPIDS $!"        # collect just the racer PIDs; we want to wait for these to finish, but NOT for the daemon, which runs the whole test and would never return
     i=$((i+1))
 done
 for p in $RPIDS; do wait "$p"; done

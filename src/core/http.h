@@ -39,8 +39,10 @@ typedef struct {
     char value[HTTP_MAX_HDR_VALUE];
 } http_header;
 
-/* A buffered connection. `buf[pos..len)` holds bytes read but not yet
- * consumed — after http_read_request that is the start of the body. */
+/* A connection plus its read buffer. The slice `buf[pos..len)` is the
+ * bytes we've read from the socket but not yet handed out; once
+ * http_read_request returns, that leftover slice is the front of the
+ * request body (the headers having been consumed). */
 typedef struct {
     int    fd;
     char   buf[HTTP_BUF_SZ];
@@ -67,10 +69,12 @@ int http_read_request(http_conn *c, http_request *r, char *err, size_t errn);
 /* Case-insensitive header lookup; NULL if absent. */
 const char *http_header_get(const http_request *r, const char *name);
 
-/* The body bytes already read into the connection buffer past the
- * headers. The returned pointer borrows that buffer and stays valid only
- * until the next read on `c`; the caller streams the rest of the body
- * (Content-Length minus this prefix) directly from the fd. */
+/* Hands back the body bytes that happened to come in alongside the
+ * headers and are already sitting in the connection buffer. The pointer
+ * doesn't own that memory -- it just points into `c`'s buffer, so it's
+ * only good until the next read on `c` overwrites it. Whatever body is
+ * left after this prefix (Content-Length minus this many bytes) the caller
+ * reads straight from the fd. */
 void http_body_prefix(http_conn *c, const char **p, size_t *n);
 
 /* Write exactly n bytes to fd (handles short writes / EINTR). 0 / -1. */

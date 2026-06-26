@@ -27,20 +27,28 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-/* Resolve a URL subpath (the part after "/v1/fs") to an absolute path
- * under `root`. Percent-decodes first, then lexically rejects traversal:
- * any "." is skipped, any ".." / NUL / control byte fails with EINVAL.
- * A trailing slash sets *is_dir true (and is stripped from `out`); the
- * empty path and "/" resolve to the root itself with *is_dir true.
- * Returns 0, or -1 with errno = EINVAL (bad path) or ENAMETOOLONG. */
+/* Turn a URL subpath (whatever follows "/v1/fs") into a full filesystem
+ * path inside `root`. First it undoes percent-encoding (URLs spell a space
+ * as "%20", a slash as "%2F", and so on). Then it walks the path purely by
+ * reading the text -- no disk touched yet -- and refuses anything that
+ * could climb out: a lone "." (meaning "this folder") is harmlessly
+ * skipped, but a ".." ("go up one"), a NUL byte, or any control byte fails
+ * with EINVAL. A trailing slash means "this is a directory": *is_dir is set
+ * true and the slash is trimmed from `out`. The empty path and "/" both
+ * point at `root` itself, again with *is_dir true. Returns 0, or -1 with
+ * errno = EINVAL (bad path) or ENAMETOOLONG (result wouldn't fit). */
 int fsapi_resolve(const char *root, const char *urlsub,
                   char *out, size_t outn, bool *is_dir);
 
-/* Filesystem-level containment: the lexical jail in fsapi_resolve stops
- * "..", but not a symlink already in the share that points outside it.
- * Canonicalize the longest existing prefix of `abspath` (a not-yet-created
- * tail carries no symlink of its own) and require it to sit under the
- * canonicalized `root`. 0 if contained, -1 with errno = EACCES if it
+/* Second line of defense, this time against the real disk. The text-only
+ * check in fsapi_resolve blocks "..", but it can't see a symlink (a file
+ * that's really a pointer to somewhere else) that already lives in the
+ * share and aims outside it. So take `abspath`, find the longest leading
+ * part that actually exists on disk, and ask the OS to resolve it fully --
+ * following every symlink -- into one true "canonical" path. (A tail that
+ * hasn't been created yet can't hide a symlink, so checking the existing
+ * prefix is enough.) That canonical path must sit under the canonicalized
+ * `root`. Returns 0 if it stays inside, -1 with errno = EACCES if it
  * escapes. Call after fsapi_resolve, before the operation runs. */
 int fsapi_contained(const char *root, const char *abspath);
 
@@ -48,13 +56,18 @@ int fsapi_contained(const char *root, const char *abspath);
  * (the UNAS export squashes root). 0, or -1 with a message in `err`. */
 int fsapi_check_root(const char *root, char *err, size_t errn);
 
-/* Durable streaming write. Consumes `prebuf[0..prelen)` (body bytes the
- * HTTP layer already read) then reads the remainder from `src_fd` until
- * `content_length` bytes are stored, via temp -> fsync -> publish ->
- * fsync(dir). Parent directories are created. When `excl` is true the
- * publish uses link(2), so an existing target fails with EEXIST atomically
- * (create-only / If-None-Match: *); otherwise rename(2) (clobber).
- * 0 / -1 (errno). */
+/* Write the body to disk so it survives a crash. It first uses up the
+ * bytes the HTTP layer already had in hand (`prebuf[0..prelen)`), then
+ * pulls the rest from `src_fd` until exactly `content_length` bytes are
+ * saved. The durable recipe is always the same four steps: write into a
+ * temp file in the same directory; fsync it (force the bytes out of memory
+ * onto the physical disk); publish it under the real name; then fsync the
+ * directory (so the new name itself is on disk). Missing parent
+ * directories are created along the way. The publish step depends on
+ * `excl`: when true it uses link(2), which refuses with EEXIST -- in one
+ * indivisible step -- if the target already exists (create-only writes,
+ * i.e. the If-None-Match: * request); when false it uses rename(2), which
+ * overwrites any existing file. Returns 0, or -1 with errno set. */
 int fsapi_write_stream(const char *abspath, int src_fd,
                        const char *prebuf, size_t prelen,
                        long long content_length, bool excl);

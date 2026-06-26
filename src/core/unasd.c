@@ -61,10 +61,14 @@ typedef struct {
  * Small helpers
  * ==================================================================== */
 
-/* Compare a presented token against the configured one in time that does
- * not depend on how many leading bytes match, so a network attacker
- * cannot recover the token byte-by-byte from response timing. The loop
- * runs over the configured token's full length regardless of input. */
+/* Compare the token a caller presented against the real one. The trick:
+ * always take the same amount of time, no matter how many leading bytes
+ * happen to match. A naive compare bails at the first mismatch, and an
+ * attacker watching the reply clock could exploit that — guess the first
+ * byte, see the reply come back a hair later when it's right, lock it in,
+ * move to the next, and peel the secret off one byte at a time. So we
+ * never bail early: the loop walks the configured token's full length
+ * regardless of input, and we fold the length difference in too. */
 static bool token_eq(const char *got, const char *want)
 {
     size_t lw = strlen(want), lg = strlen(got), i;
@@ -200,8 +204,11 @@ static void send_json_head(http_conn *c)
  * GET/HEAD on a file (with Range)
  * ==================================================================== */
 
-/* Parse "bytes=a-b" / "a-" / "-suffix". 0 if satisfiable, -1 if not — a
- * non-numeric token is rejected (-> 416), not silently read as 0. */
+/* Parse a Range header: "bytes=a-b", "a-" (from a to the end), or
+ * "-suffix" (the last N bytes). Returns 0 if the range can be served, -1
+ * if not. Note the strict parsing: a non-numeric token is rejected (the
+ * caller turns that into a 416), never quietly treated as 0 — letting
+ * "bytes=abc-" mean "start at 0" would serve the wrong bytes silently. */
 static int parse_range(const char *h, long long size, long long *ps, long long *pe)
 {
     long long s, e;
@@ -275,10 +282,12 @@ static void serve_file(http_conn *c, const char *abspath, const struct stat *st,
 
     http_send_headers(c, partial ? 206 : 200, NULL, hdrs);
     if (is_head) { (void)close(fd); return; }
-    /* Headers (with Content-Length) are already committed past this point, so a
-     * seek or read failure below can only truncate the body — there is no way
-     * left to signal an error. Unreachable in practice: regular file just
-     * stat'd, offset already validated against size. */
+    /* We've already sent the headers, including Content-Length, which promised
+     * the client exactly how many bytes follow. That promise can't be taken
+     * back: an HTTP reply has no "never mind" once the headers are on the wire,
+     * so a seek or read failure here could only cut the body short, not raise a
+     * proper error. In practice it can't fail anyway — this is a regular file
+     * we just stat'd, and the offset was already checked against its size. */
     if (partial && lseek(fd, (off_t)start, SEEK_SET) == (off_t)-1) { (void)close(fd); return; }
 
     {
@@ -378,7 +387,7 @@ static void dispatch_fs(const unas_server *srv, http_conn *c, http_request *r,
         {
             const char *inm = http_header_get(r, "If-None-Match");
             const char *im  = http_header_get(r, "If-Match");
-            excl = (inm && strcmp(inm, "*") == 0);       /* create-only: enforced atomically below */
+            excl = (inm && strcmp(inm, "*") == 0);       /* "If-None-Match: *" = create only if absent; the absence check and the create happen as one atomic step in fsapi_write_stream, so two racing PUTs can't both win */
             if (excl && have) { reply_problem(c, 412, "EEXIST", disp, "exists (If-None-Match: *)"); return; }
             if (im && (!have || !if_match_ok(&st, im))) { reply_problem(c, 412, "EMISMATCH", disp, "ETag does not match (If-Match)"); return; }
         }
@@ -631,9 +640,12 @@ static int read_token_file(const char *path, char *out, size_t outn)
     return out[0] ? 0 : -1;
 }
 
-/* Best-effort: drop the chosen port and token where a UI can read them. The
- * token file is created 0600 (owner-only) — it persists the bearer secret to
- * disk. O_TRUNC reuse keeps a pre-existing file's looser mode. */
+/* Best-effort: drop the chosen port and token in a spot a UI can pick them
+ * up. We create the token file with mode 0600 — readable and writable by
+ * its owner and nobody else — because it holds the bearer secret on disk.
+ * One caveat: the 0600 only takes effect when open() creates the file. If a
+ * file is already there, O_TRUNC empties and reuses it but leaves its old,
+ * possibly looser permissions untouched. */
 static void write_state(const char *dir, int port, const char *token)
 {
     char p[PATHCAP], line[300];
@@ -660,15 +672,22 @@ static void usage(const char *prog)
         prog);
 }
 
-/* Live forked children, maintained by the SIGCHLD reaper so the accept loop
- * can enforce a concurrency cap. volatile sig_atomic_t: touched by both the
- * handler and main. */
+/* Count of forked children still running, kept current by the SIGCHLD
+ * reaper so the accept loop can refuse new work once the cap is hit. Typed
+ * volatile sig_atomic_t because two flows of control touch it — the signal
+ * handler and main — and that type is the one C guarantees can be read and
+ * written safely across that boundary. */
 static volatile sig_atomic_t live_children = 0;
 
-/* SIGCHLD reaper. A concurrency cap needs an exit count, so we cannot use
- * SIG_IGN auto-reaping (it gives no notification). The WNOHANG loop coalesces
- * several exits delivered as one signal; errno is saved/restored because waitpid
- * clobbers it and this runs asynchronously between any two statements in main. */
+/* SIGCHLD reaper — the cleanup crew for finished children. We can't just
+ * tell the kernel to auto-clean them (SIG_IGN does that) because then we'd
+ * never learn one exited, and the concurrency cap needs an accurate count.
+ * The signal can also arrive once to stand in for several children that
+ * exited close together, so we loop with WNOHANG ("reap any that are done,
+ * don't wait around") until none are left. We save and restore errno because
+ * waitpid overwrites it, and this handler can fire between any two
+ * statements in main — leaving errno changed under main's feet would be a
+ * heisenbug. */
 static void reap_children(int sig)
 {
     int saved = errno;
@@ -780,9 +799,11 @@ int main(int argc, char **argv)
             set_io_timeout(cfd, srv.io_timeout);          /* a non-reading client must not stall the reject */
             reply_busy(cfd); close(cfd); continue;        /* at capacity: 503, no fork */
         }
-        /* Block SIGCHLD across fork + increment so a child that exits instantly
-         * cannot have the reaper decrement live_children before we count it
-         * (the classic fork/SIGCHLD counter race). */
+        /* Hold SIGCHLD off across the fork and the live_children++ that follows.
+         * Without it, a child could finish so fast that the reaper runs and
+         * decrements the count before we ever got to increment it — the count
+         * drifts up by one each time and the cap slowly jams. Blocking the signal
+         * here keeps increment-then-eventual-decrement in the right order. */
         sigemptyset(&block); sigaddset(&block, SIGCHLD);
         sigprocmask(SIG_BLOCK, &block, &prev);
         pid = fork();

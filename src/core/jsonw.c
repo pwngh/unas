@@ -123,10 +123,21 @@ void jb_obj_close(json_buf *b) { jb_putc(b, '}'); pop(b); }
 void jb_arr_open(json_buf *b) { pre_value(b); jb_putc(b, '['); push(b); }
 void jb_arr_close(json_buf *b) { jb_putc(b, ']'); pop(b); }
 
-/* Length (1-4) of the valid UTF-8 sequence beginning at s, or 0 if s[0]
- * does not start one. Rejects overlong encodings, UTF-16 surrogates, and
- * code points above U+10FFFF. The string is NUL-terminated, and NUL is
- * never a valid continuation byte, so the lookahead never reads past it. */
+/* How many bytes (1-4) the UTF-8 character at s occupies, or 0 if s[0]
+ * isn't a valid start byte. UTF-8 packs one character into 1-4 bytes; a
+ * multi-byte one begins with a "start" byte and is filled out by
+ * "continuation" bytes (each tagged 10xxxxxx). We reject three kinds of
+ * malformed input that an attacker could otherwise smuggle through:
+ *   - overlong encodings: a character padded into more bytes than it needs,
+ *     so two different byte strings could mean the same character (a way to
+ *     sneak a '/' or '.' past a path check),
+ *   - surrogates (U+D800..U+DFFF): half-of-a-pair code points that are legal
+ *     in UTF-16 but forbidden as standalone UTF-8 characters,
+ *   - anything above U+10FFFF, the highest code point Unicode defines.
+ * We peek ahead at the continuation bytes to validate. That peek is safe
+ * because the string ends in a NUL (0) byte, and 0 can never be a
+ * continuation byte: the moment we hit it a check fails and we stop, so we
+ * never read past the end of the string. */
 static int utf8_seq_len(const unsigned char *s)
 {
     unsigned char c = s[0];
@@ -151,9 +162,12 @@ static int utf8_seq_len(const unsigned char *s)
     return 0;
 }
 
-/* Emit a JSON string literal (quotes + escaping). Valid UTF-8 passes
- * through verbatim; an invalid byte becomes U+FFFD so a listing of a
- * filename with bad bytes is still well-formed JSON. */
+/* Emit a JSON string literal: wrap s in quotes and escape what JSON
+ * requires. Valid UTF-8 is copied through unchanged; a byte that isn't
+ * valid UTF-8 is replaced with U+FFFD, the standard "unknown character"
+ * symbol. That swap matters because a filename can hold arbitrary bytes,
+ * and one bad byte left raw would corrupt the whole response into
+ * something no JSON parser would accept. */
 static void emit_string(json_buf *b, const char *s)
 {
     const unsigned char *p = (const unsigned char *)s;

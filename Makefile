@@ -52,8 +52,12 @@ DAEMON_OBJS = src/core/unasd.o
 
 all: unasd
 
-# Built from scratch each time: `ar -r` updates an archive in place and
-# would keep stale members after a module is renamed or dropped.
+# Rebuilt from scratch each time. An archive (.a) is just a bundle of
+# compiled .o files; `ar -r` edits that bundle in place, adding or
+# replacing members but never noticing one that is gone. So if a module
+# is renamed or dropped, its old .o would linger inside. Deleting the
+# archive first (the `rm -f $@` below) guarantees only today's members
+# are in it.
 libunas.a: $(LIB_OBJS)
 	rm -f $@
 	$(AR) $(ARFLAGS) $@ $(LIB_OBJS)

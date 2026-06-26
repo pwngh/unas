@@ -36,9 +36,11 @@
  *     jb_obj_close(&b);
  *     size_t n; char *s = jb_take(&b, &n);   // caller owns s
  *
- * On a failure (allocation OOM, or nesting past JB_MAX_DEPTH) b.err is set;
- * all further calls are no-ops and jb_take returns NULL. Always check b.err
- * (or a NULL from jb_take).
+ * If anything goes wrong -- running out of memory, or nesting objects and
+ * arrays deeper than JB_MAX_DEPTH -- b.err is set and stays set. From that
+ * point every builder call quietly does nothing, and jb_take returns NULL.
+ * So you don't have to check after each call: just check b.err once at the
+ * end (or notice the NULL from jb_take).
  * ==================================================================== */
 
 #define JB_MAX_DEPTH 32

@@ -22,9 +22,12 @@
 
 #include <stddef.h>
 
-/* Fill `buf` with `n` cryptographically strong random bytes. Does not
- * return on catastrophic RNG failure — it aborts, because the access
- * token must never silently fall back to predictable bytes. */
+/* Fill `buf` with `n` cryptographically strong random bytes -- the kind
+ * safe to build a secret from, not the predictable kind. If the random
+ * source ever fails badly, this function does not return at all: it aborts
+ * the whole program on purpose. A guessable access token would be worse
+ * than a crash, so it refuses to hand back anything less than real
+ * randomness. */
 void unas_random_bytes(void *buf, size_t n);
 
 #endif /* UNAS_COMPAT_RANDOM_H */

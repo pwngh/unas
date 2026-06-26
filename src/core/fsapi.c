@@ -57,9 +57,11 @@ static void fsync_dir(const char *dir)
 {
     int fd = open(dir, O_RDONLY);
     if (fd < 0) return;
-    /* Some servers reject fsync on a directory fd with EINVAL; that is
-     * not fatal — it just means dir-entry durability isn't separately
-     * guaranteed. */
+    /* fsync forces pending changes to disk; here we ask it to flush the
+     * directory itself, so a newly published filename survives a crash. Some
+     * filesystems refuse fsync on a directory and answer EINVAL (invalid
+     * argument); that's not fatal — it only means we can't separately promise
+     * the directory entry is on disk yet, so we ignore the refusal and move on. */
     (void)fsync(fd);
     (void)close(fd);
 }
@@ -314,10 +316,13 @@ fail_noclose:
 
 int fsapi_move(const char *src, const char *dst)
 {
-    /* Same-filesystem only: this publishes with rename(2), so a cross-device
-     * move returns EXDEV to the caller rather than copying. No internal
-     * fallback: an API client wanting a cross-device move issues COPY then
-     * DELETE. */
+    /* Same-filesystem only. We finish the move with rename(2), which can shuffle
+     * a name from one place to another but cannot carry the actual bytes across
+     * a disk boundary — try to rename onto a different filesystem and the kernel
+     * stops you with errno EXDEV (cross-device link). We hand that EXDEV straight
+     * back rather than silently copying. There's no internal fallback by design:
+     * an API client that wants to move across devices does it in two steps,
+     * COPY then DELETE. */
     char dparent[FSAPI_PATH], sparent[FSAPI_PATH];
     parent_of(dst, dparent, sizeof dparent);
     if (fsapi_mkdirs(dparent) != 0) return -1;

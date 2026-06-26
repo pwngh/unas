@@ -20,11 +20,12 @@
 #include <errno.h>
 #include <unistd.h>
 
-/* C99 offers no portable way to tell the compiler that a function takes
- * a printf-style format string. Wrap the GCC/Clang attribute behind a
- * macro that expands to nothing where it is unavailable; where it is,
- * -Wformat type-checks the one varargs helper below against its format
- * argument and the values passed for it. */
+/* We'd like the compiler to catch printf-style mistakes — like passing an
+ * int where the format string says %s — in our one varargs helper below.
+ * Standard C99 has no portable way to ask for that, but GCC and Clang offer
+ * a __attribute__((format(printf,...))) hint. This macro carries that hint
+ * where the compiler understands it (so -Wformat checks the format string
+ * against the values passed for it) and expands to nothing everywhere else. */
 #if defined(__GNUC__) || defined(__clang__)
 #  define UNAS_PRINTF(fmt_idx, var_idx) __attribute__((format(printf, fmt_idx, var_idx)))
 #else
@@ -87,9 +88,10 @@ static void parse_request_line(http_request *r, const char *line, size_t n)
     while (i < n && line[i] != ' ') i++;
     te = i;
     copy_bounded(r->target, sizeof r->target, line + ts, te - ts);
-    /* Whatever follows the target (the HTTP-version token) is left
-     * unread: the server always answers HTTP/1.1 and closes, so the
-     * client's version never changes a response. */
+    /* The third word on the request line is the client's HTTP version
+     * ("HTTP/1.1", "HTTP/1.0", ...). We don't even read it: this server
+     * always replies in HTTP/1.1 and then hangs up, so whatever version
+     * the client claims can't change a single byte of our answer. */
     /* path = target up to '?' */
     {
         const char *q = memchr(r->target, '?', strlen(r->target));
@@ -176,9 +178,12 @@ int http_read_request(http_conn *c, http_request *r, char *err, size_t errn)
         return -1;
     }
 
-    /* Reject a request bearing more than one Content-Length: the two values
-     * can disagree (a request-smuggling lever) and there is no safe single
-     * answer. RFC 7230 §3.3.2 permits a 400 here, which serve_conn returns. */
+    /* If a request carries two Content-Length headers, their numbers can
+     * disagree about how long the body is. An attacker exploits that gap
+     * to sneak a second hidden request through a proxy that trusts one
+     * value while we trust the other ("request smuggling"). With no safe
+     * way to pick a winner, we refuse: RFC 7230 §3.3.2 allows a 400 here,
+     * and serve_conn sends it. */
     {
         size_t i, ncl = 0;
         for (i = 0; i < r->nheaders; i++)
@@ -189,10 +194,14 @@ int http_read_request(http_conn *c, http_request *r, char *err, size_t errn)
         }
     }
 
-    /* A present-but-unparseable or negative Content-Length leaves the field at
-     * -1 in parse_header_line; reject it (400) rather than treating it as
-     * absent — which would answer 411 "Content-Length required" for a length
-     * the client did send. RFC 7230 §3.3.2 calls for rejecting an invalid CL. */
+    /* parse_header_line leaves content_length at -1 in two cases: the header
+     * was absent, or it was present but garbage (non-numeric or negative).
+     * Here we tell those apart by checking whether the header exists at all.
+     * If it does and the value is still -1, the client DID send a length, it
+     * was just unreadable — so we reject with 400 instead of letting it fall
+     * through to the 411 "Content-Length required" path, which would wrongly
+     * scold the client for omitting something it actually sent. RFC 7230
+     * §3.3.2 calls for rejecting an invalid Content-Length. */
     if (http_header_get(r, "Content-Length") && r->content_length < 0) {
         if (err && errn) snprintf(err, errn, "malformed Content-Length");
         return -1;
