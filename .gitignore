@@ -24,3 +24,10 @@ tests/api/test_jsonw
 
 # macOS
 .DS_Store
+
+# Node dev tooling (examples/, companion/)
+node_modules/
+
+# Python bytecode (examples/)
+__pycache__/
+*.pyc
