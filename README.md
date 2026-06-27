@@ -99,6 +99,9 @@ HTTP/1.1 404 Not Found
           "message":"No such file or directory"}}
 ```
 
+Prefer code to curl? Copy-paste clients for Python and TypeScript — covering the
+whole API with streaming, timeouts, and typed errors — are in [examples/](examples/).
+
 ## More verbs
 
 Rename, copy, and delete follow the same shape. `MOVE`/`COPY` take the

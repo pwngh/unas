@@ -1,0 +1,14 @@
+{
+  "name": "unas-client-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Example TypeScript client for the unas file daemon (Node 18+ / Bun / Deno)",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5"
+  }
+}
